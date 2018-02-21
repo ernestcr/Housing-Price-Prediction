@@ -1,0 +1,667 @@
+---
+title: "MachineLearning_Lab1_Natasha_Nika"
+author: Natasha Savic, Nika Tamaio Flores
+date: "17/02/2018"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+  pdf_document: default
+editor_options:
+  chunk_output_type: console
+---
+
+#Housing Price Prediction 
+
+#Introduction
+If we were to ask a home buyer to explain their dream house, they would probably not begin with the height of the garage ceiling or the proximity to a highway. The questions that really concern home buyers are which the determinants of housing prices are. Would it be possible to explain the price of a house by considering only some particular features like e.g. the neighbourhood of the house?
+
+Good, there are aspiring data scientists like us to solve such questions and, even better, provide a model that predicts housing prices!
+
+So brace yourself, pour a big glass of beer and enjoy our predictive analysis of housing prices in Ames!
+
+##Libraries
+```{r message=FALSE}
+library(arm)
+library(ggplot2)
+library(plyr)
+library(dplyr)
+library(moments)
+library(glmnet)
+library(caret)
+library(e1071)
+library(tidyr)
+library(mice)
+library(MASS)
+library(tree)
+library(gbm)
+library(VIM)
+```
+
+
+##Data Reading
+In this part, we will clean and read the data. 
+
+```{r train data, warning=FALSE}
+setwd('/Users/natasha/Desktop/ML II/Lab_1_Natasha_Nika')
+df <- read.csv('train.csv', sep=',', header=T)
+```
+
+##Check NA's
+
+```{r check na, warning=FALSE}
+na.cols <- which(colSums(is.na(df)) > 0)
+paste('There are', length(na.cols), 'columns with missing values')
+sort(colSums(sapply(df[na.cols], is.na)), decreasing = TRUE)
+```
+
+#Data Preparation
+##Data Cleaning - Train Dataset
+
+The visualisation part of this section has been adopted by [missingDataLab](http://web.maths.unsw.edu.au/~dwarton/missingDataLab.html).
+
+```{r, warning=FALSE, message=FALSE, fig.keep='high'}
+#Check Missing Values
+#Now we will check the proportion of missing values plotting them 
+df_aggr = aggr(df, col=mdc(1:2), numbers=TRUE, sortVars=TRUE, labels=names(df), cex.axis=.7, gap=3, ylab=c("Proportion of missingness","Missingness Pattern"))
+```
+
+Sweet! Now we see that there are particular features we need to focus on when cleaning the data. As the plot illustrates, critical features include PoolQC, MiscFeature, Alley, Fence and FireplaceQu and convert features to the right data type.
+
+```{r, warning=FALSE}
+#take care of critical Columns manually, rest using mice
+df$Alley = factor(df$Alley, levels=c(levels(df$Alley), "None")) #appending another level "None" to exisiting levels
+df$Alley[is.na(df$Alley)] = "None" #replace NA's by "None"
+
+# Fence : NA means "no fence"
+df$Fence = factor(df$Fence, levels=c(levels(df$Fence), "No"))
+df$Fence[is.na(df$Fence)] = "No"
+
+# FireplaceQu : NA means "no fireplace"
+df$FireplaceQu = factor(df$FireplaceQu, levels=c(levels(df$FireplaceQu), "No")) #factor the data
+df$FireplaceQu[is.na(df$FireplaceQu)] = "No"
+
+# MiscFeature : NA = "no misc feature"
+df$MiscFeature = factor(df$MiscFeature, levels=c(levels(df$MiscFeature), "No"))
+df$MiscFeature[is.na(df$MiscFeature)] = "No"
+
+# PoolQC : data description says NA means "no pool"
+df$PoolQC = factor(df$PoolQC, levels=c(levels(df$PoolQC), "No"))
+df$PoolQC[is.na(df$PoolQC)] = "No"
+
+
+#Factorize features. Some numerical features are actually really categories
+df$MSSubClass <- as.factor(df$MSSubClass)
+df$MoSold <- as.factor(df$MoSold)
+```
+
+##Data Imputation
+
+Cool, that wasn't even that painful! We will now proceed with removing those missing values and make another plot to cross-validate. For this, we will use the package mice. The Function mice() is a Markov Chain Monte Carlo (MCMC) method that uses the correlation structure of the data and imputes missing values for each incomplete variable' times by regression of incomplete variables on the other variables iteratively. However, we will not apply 'mice' on every feature but rather "clean" critical features manually and perform imputations for the remaining features using the quickpred() function to leverage computational time with accuracy. 
+
+```{r, results="hide", warning=FALSE}
+imp = mice(df, pred=quickpred(df, minpuc = 0.25, exclude = c("PoolQC", "MiscFeature", "Alley", "Fence", "FireplaceQu", "LotFrontage", "SalePrice")), maxit = 1, method = 'cart')
+summary(imp)
+completedData <- complete(imp,1)
+```
+
+To doublecheck the "cleaniliness" of our data we will plot it once more. 
+
+```{r, warning=FALSE, message=FALSE, fig.keep='high'}
+df_aggr = aggr(completedData, col=mdc(1:2), numbers=TRUE, sortVars=TRUE, labels=names(completedData), cex.axis=.7, gap=3, ylab=c("Proportion of missingness","Missingness Pattern"))
+```
+
+The output shows that there are no missing values for our data anymore. Let's now repeat the same for our test dataset!
+
+##Data Cleaning Test Dataset
+
+We will do now the same for the test dataset to ensure consistency. We will name the test dataset as *dft* whereas the training dataset represents *df*. 
+```{r test data, warning=FALSE}
+dft <- read.csv('test.csv', sep=',', header=T)
+```
+
+###Check NA's
+
+```{r test check na, warning=FALSE}
+na.cols <- which(colSums(is.na(dft)) > 0)
+paste('There are', length(na.cols), 'columns with missing values')
+sort(colSums(sapply(dft[na.cols], is.na)), decreasing = TRUE)
+```
+
+
+```{r, warning=FALSE, message=FALSE, fig.keep='high'}
+#Check Missing Values
+dft_aggr = aggr(dft, col=mdc(1:2), numbers=TRUE, sortVars=TRUE, labels=names(dft), cex.axis=.7, gap=3, ylab=c("Proportion of missingness","Missingness Pattern"))
+
+```
+
+Similar picture as for our training dataset however, we see small differences here. For example, the feature "LotFrontage" has a significant number of NA's in the test dataset hence, we chose to clean this variable manually too. 
+
+```{r test fill na, warning=FALSE}
+#take care of critical columns manually, rest using mice
+
+dft$Alley = factor(dft$Alley, levels=c(levels(dft$Alley), "None")) #appending another level "None" to exisiting levels
+dft$Alley[is.na(dft$Alley)] = "None" #replace NA's by "None"
+
+# Fence : NA means "no fence"
+dft$Fence = factor(dft$Fence, levels=c(levels(dft$Fence), "No"))
+dft$Fence[is.na(dft$Fence)] = "No"
+
+# FireplaceQu : NA means "no fireplace"
+dft$FireplaceQu = factor(dft$FireplaceQu, levels=c(levels(dft$FireplaceQu), "No")) 
+dft$FireplaceQu[is.na(dft$FireplaceQu)] = "No"
+
+# MiscFeature : NA = "no misc feature"
+dft$MiscFeature = factor(dft$MiscFeature, levels=c(levels(dft$MiscFeature), "No"))
+dft$MiscFeature[is.na(dft$MiscFeature)] = "No"
+
+# PoolQC : data description says NA means "no pool"
+dft$PoolQC = factor(dft$PoolQC, levels=c(levels(dft$PoolQC), "No"))
+dft$PoolQC[is.na(dft$PoolQC)] = "No"
+
+# LotFrontage : NA most likely means no lot frontage
+dft$LotFrontage[is.na(dft$LotFrontage)] <- 0
+
+#Factorize features. Some numerical features are actually categories
+dft$MSSubClass <- as.factor(dft$MSSubClass)
+dft$MoSold <- as.factor(dft$MoSold)
+```
+
+##Data Imputation Test Dataset
+
+```{r test mice, results="hide", warning=FALSE}
+impt = mice(dft, pred=quickpred(dft, minpuc = 0.25, exclude = c("PoolQC", "MiscFeature", "Alley", "Fence", "FireplaceQu", "LotFrontage", "SalePrice")), maxit = 1, method = 'cart')
+summary(impt)
+completedDataTest <- complete(impt,1)
+```
+
+Doublechecking the "cleaniliness" of our data.
+
+```{r, warning=FALSE, message=FALSE, fig.keep='high'}
+#An intermediate plot will show that utilities still contains NA's hence, we will remove them manually
+df_aggr = aggr(completedDataTest, col=mdc(1:2), numbers=TRUE, sortVars=TRUE, labels=names(completedDataTest), cex.axis=.7, gap=3, ylab=c("Proportion of missingness","Missingness Pattern"))
+```
+
+This diagnostic plot illustrates that still there is one variable which causes NA's. We will check it manually and find out that it only has one value. As this feature contains almost no information, we will remove it. Other than that, our datasets seem pretty clean and we're good to jump onto the more interesting parts of feature engineering and modelling!
+
+```{r test Utilities, warning=FALSE}
+# Remove the Utilities feature from the dataset (It only has one value)
+completedData <- completedData[,-which(names(completedData) == "Utilities")]
+completedDataTest <- completedDataTest[,-which(names(completedDataTest) == "Utilities")]
+
+```
+
+
+##Skewness
+Before running a linear model we need to observe how our target variable behaves. Hence we will plot the data points of *SalePrice* in order to check skewness.
+```{r check skew, warning=FALSE}
+#Get data frame of SalePrice and log(SalePrice + 1) for plotting
+dfl <- rbind(data.frame(version="log(price+1)",x=log(completedData$SalePrice + 1)), data.frame(version="price",x=completedData$SalePrice))
+
+ggplot(data=dfl) +
+  facet_wrap(~version,ncol=2,scales="free_x") +
+  geom_histogram(aes(x=x), bins = 50)
+```
+
+Our intuition proved right and indeed we could observe skewness in the target variable. In order to counteract this and obtain a behavior that follows more a normal distribution we will transform the target value by applying the natural log to our response variable *SalePrice*.
+
+```{r Log transform, warning=FALSE}
+# Log transform the target for official scoring
+completedData$SalePrice <- log1p(completedData$SalePrice)
+```
+
+The same "skewness" observed in the target variable also affects other variables. To facilitate the application of the regression model we are going to also eliminate this skewness. For numeric feature with excessive skewness, perform log transformation.
+
+```{r remove skew, warning=FALSE}
+
+column_types <- sapply(names(completedData),function(x){class(completedData[[x]])})
+numeric_columns <-names(column_types[column_types != "factor"])
+
+# skew of each variable
+skew <- sapply(numeric_columns,function(x){skewness(completedData[[x]],na.rm = T)})
+# transform all variables above a threshold skewness.
+
+#Testing different thresholds might lead to improved results 
+skew <- skew[skew > 0.75]
+for(x in names(skew)) {
+  completedData[[x]] <- log(completedData[[x]] + 1)
+}
+
+```
+
+Performing the same for the test data.
+
+```{r remove skew test, warning=FALSE}
+column_types <- sapply(names(completedDataTest),function(x){class(completedDataTest[[x]])})
+numeric_columns <-names(column_types[column_types != "factor"])
+
+skew <- sapply(numeric_columns,function(x){skewness(completedDataTest[[x]],na.rm = T)})
+skew <- skew[skew > 0.75]
+for(x in names(skew)) {
+  completedDataTest[[x]] <- log(completedDataTest[[x]] + 1)
+}
+```
+
+##Removing Outliers
+
+Now let's get rid of outliers. This technique is oftentimes debated amongst data scientist and statisticians. While some outliers do deserve to be included in a model, oftentimes outliers are also the result of human error such as typos. Of course, this does not mean that outliers do not deserve their place in the data. For instance, in reality, it could happen that there are some particularly luxurious houses which cost more than our model predicted. Yet, we assume that there aren't many of such properties in Ames (as opposed to e.g. Monte Carlo in France), thus we will remove the outliers for further analysis and obtain a more generic model. 
+
+```{r remove outliers, warning=FALSE}
+remove_outliers <- function(x, na.rm = TRUE, ...) {
+  qnt <- quantile(x, probs=c(.25, .75), na.rm = na.rm, ...)
+  H <- 1.5 * IQR(x, na.rm = na.rm)
+  y <- x
+  y
+}
+
+feature_classes <- sapply(names(completedData),function(x){class(completedData[[x]])})
+
+num_feats <-names(feature_classes[feature_classes != "factor"])
+categorical <- names(feature_classes[feature_classes == "factor"])
+
+num_df <- completedData[num_feats]
+categorical_df <- completedData[categorical]
+
+completedData1 <- sapply(names(num_df),function(x){remove_outliers(num_df[[x]])}) 
+
+completedData <- cbind(completedData1, categorical_df)
+```
+
+#Feature Engineering
+
+Oftentimes information is hidden within the data such as some particularly valuable insight is hidden between the lines of a good book. To extract such hidden information we will perform feature engineering and create new possible predictors which could help us to build a better model. For some specific new features, we chose to add descriptions to illustrate the logic behind combining and extracting information. 
+
+**Refurb**
+*If Year Built is different from Year Remodeled then we can assume there was some refurbishment, the refurbishment will likely increase the property value*
+
+```{r refurb, warning=FALSE}
+#for train set
+completedData = completedData %>%
+  mutate(Refurb = ifelse(YearBuilt != YearRemodAdd, 1, 0))
+
+#for test set
+completedDataTest = completedDataTest %>%
+  mutate(Refurb = ifelse(YearBuilt != YearRemodAdd, 1, 0))
+
+```
+
+**Seasonality**
+*Seasonality (binary): We can assume cyclical events where the month and year sold had an effect on the house price. For instance, in low-interest rate cycles (e.g 2015-2017) the prices of houses are higher than in low-interest periods. Since this particular dataset focusses on the years 2006-2010 we need to do some research and assign categories according to the pricing development during this time. Such events are also called unsystematic since they are influenced by external market forces and push prices out of their market equilibrium.*
+
+```{r season, message=FALSE, warning=FALSE}
+#check levels of month & year sold
+levels(df$MoSold) # 1 - 12 indicating Jan - Dec
+levels(df$YrSold) #2006 - 2010
+
+#for train set
+completedData = completedData %>%
+  mutate(Season = ifelse(YrSold  == 2006 & MoSold != c(1, 2, 11, 12), "A", 
+                         ifelse(YrSold  == 2006 & MoSold == c(1, 2, 11, 12),"B",
+                         ifelse(YrSold  != c(2008, 2009) & MoSold != c(1, 2, 11, 12),"C",
+                         ifelse(YrSold  == c(2008, 2009),"F", "D")))))
+
+completedData$Season = as.factor(completedData$Season)
+
+
+#for test set
+completedDataTest = completedDataTest %>%
+  mutate(Season = ifelse(YrSold  == 2006 & MoSold != c(1, 2, 11, 12), "A", 
+                         ifelse(YrSold  == 2006 & MoSold == c(1, 2, 11, 12),"B",
+                         ifelse(YrSold  != c(2008, 2009) & MoSold != c(1, 2, 11, 12),"C",
+                         ifelse(YrSold  == c(2008, 2009),"F", "D")))))
+
+completedDataTest$Season = as.factor(completedDataTest$Season)
+
+```
+
+*Additional Features*
+```{r Train add feat, warning=FALSE}
+#total floor area
+completedData$FlrSF <- sum(completedData$X1stFlrSF, completedData$X2ndFlrSF)
+
+#total number of full bathrooms
+completedData$TotFullBath <- sum(completedData$BsmtFullBath, completedData$FullBath) 
+
+#total number of half bathrooms
+completedData$TotSmallBath <- sum(completedData$BsmtHalfBath, completedData$HalfBath)
+
+#recoding values
+levels(completedData$CentralAir) <- c(0,1)
+completedData$CentralAir <- as.numeric(as.character(completedData$CentralAir))
+#converting to numeric
+completedData$BsmntUnf <- completedData$BsmtUnfSF/completedData$TotalBsmtSF 
+
+#Unfinished basement area
+completedData$BsmntUnf[is.na(completedData$BsmntUnf)] <- 0
+
+#Unfinished house area
+completedData$AreaUnf <- completedData$LowQualFinSF/completedData$X1stFlrSF+completedData$X2ndFlrSF 
+
+#Garage and house built at the same time
+completedData$TotBuild <- completedData$GarageYrBlt-completedData$YearBuilt
+
+#Total Completed House Area
+completedData$TotArea <- sum(completedData$BsmtFinSF1, completedData$BsmtFinSF2, completedData$LotArea, completedData$TotalBsmtSF, completedData$GrLivArea)
+
+#Age of the house when sold
+completedData$Age <- completedData$YrSold-completedData$YearBuilt
+
+#Years since remodeling until the house was sold
+completedData$RemodSold <- completedData$YrSold-completedData$YearRemod 
+
+##Drop Id
+completedData <- completedData[-1] 
+```
+
+*Additional Features Test Set*
+```{r Test add feat, warning=FALSE}
+#total floor area
+completedDataTest$FlrSF <- sum(completedDataTest$X1stFlrSF, completedDataTest$X2ndFlrSF)
+
+#total number of full bathrooms
+completedDataTest$TotFullBath <- sum(completedDataTest$BsmtFullBath, completedDataTest$FullBath) 
+
+#total number of half bathrooms
+completedDataTest$TotSmallBath <- sum(completedDataTest$BsmtHalfBath, completedDataTest$HalfBath)
+
+#recoding values
+levels(completedDataTest$CentralAir) <- c(0,1)
+completedDataTest$CentralAir <- as.numeric(as.character(completedDataTest$CentralAir))
+#converting to numeric
+completedDataTest$BsmntUnf <- completedDataTest$BsmtUnfSF/completedDataTest$TotalBsmtSF 
+
+#Unfinished basement area
+completedDataTest$BsmntUnf[is.na(completedDataTest$BsmntUnf)] <- 0
+
+#Unfinished house area
+completedDataTest$AreaUnf <- completedDataTest$LowQualFinSF/completedDataTest$X1stFlrSF+completedDataTest$X2ndFlrSF 
+
+#Garage and house built at the same time
+completedDataTest$TotBuild <- completedDataTest$GarageYrBlt-completedDataTest$YearBuilt
+
+#Total Completed House Area
+completedDataTest$TotArea <- sum(completedDataTest$BsmtFinSF1, completedDataTest$BsmtFinSF2, completedDataTest$LotArea, completedDataTest$TotalBsmtSF, completedDataTest$GrLivArea)
+
+#Age of the house when sold
+completedDataTest$Age <- completedDataTest$YrSold-completedDataTest$YearBuilt
+
+#Years since remodeling until the house was sold
+completedDataTest$RemodSold <- completedDataTest$YrSold-completedDataTest$YearRemod 
+
+##Drop Id
+completedDataTest <- completedDataTest[-1] 
+```
+
+#Feature Selection 
+##Direct Techniques
+###Forward Stepwise Selection
+
+Forward Stepwise Selection is often used to generate an initial screening of the candidate variables when a large pool of variables exists. As this is the case for our housing dataset such selection procedure makes sense. One reasonable method would is to deploy such forward selection procedure to obtain the best ten to fifteen variables and then apply the all-possible algorithm to the variables within this subset.
+*This process takes time to run - get yourself another beer!*
+
+```{r forward, warning=FALSE}
+#Get olsrr package if not already installed
+library(olsrr)
+model <- lm(SalePrice ~ Fireplaces + Neighborhood + OverallQual + GrLivArea + Age +  KitchenQual + ExterQual + BsmtQual + TotalBsmtSF + YearRemodAdd + CentralAir + HeatingQC, data = completedData)
+K = ols_all_subset(model)
+plot(K)
+
+```
+
+Now we will check for the best subsets of features as well as the importance of the features.
+
+```{r best subset, warning=FALSE}
+B = ols_best_subset(model)
+plot(B)
+```
+
+We will focus on R^2 in order to select the best features and the output reveals that from the included features we should use *OverallQual GrLivArea MSSubClass TotalBsmtSF Neighborhood CentralAir HeatingQC KitchenQual* which yields a R^2 of 8705 and AIC of -1419.2022. AIC provides a means for model selection. Given a collection of models for the data, AIC estimates the quality of each model. Plotting the results illustrates a similar picture that the marginal gain in adding features after the above added 6 features is minor. 
+
+##Indirect Techniques
+###Recursive Feature Selection - Wrappers
+
+Wrapper methods use a selection of sets of features related to a specific search problem where different combinations are prepared, evaluated and compared to other combinations. We will use recursive feature selection as part of our feature selection process.
+
+```{r, warning=FALSE}
+size_sets = seq(1,length(completedData)-1, 5)
+control <- rfeControl(functions = rfFuncs, method='cv', number=5)
+results <- rfe(completedData[names(completedData) != 'SalePrice'], completedData$SalePrice, sizes = size_sets, rfeControl = control)
+print(results)
+predictors(results)
+
+p1 = plot(results, type=c('g','o'))
+p1
+```
+
+The output reveals that almost 90% of the information contained in the target variable *SalePrice* can be explained by using only 16 variables. We obtain an $R^2$ of 88% for the following predictors:
+
+* "GrLivArea"    
+* "Neighborhood" 
+* "OverallQual"  
+* "TotalBsmtSF" 
+* "MSSubClass"   
+* "GarageArea"   
+* "BsmtFinSF1"   
+* "X1stFlrSF"   
+* "LotArea"      
+* "X2ndFlrSF"    
+* "GarageCars"   
+* "AreaUnf"     
+* "RemodSold"    
+* "YearRemodAdd" 
+* "ExterQual"    
+* "Age"  
+
+Great, let's keep this result for the record when performing our actual modeling.
+
+##Tree Based Methods
+
+To determine which features we want to keep and which will just add noise to our predictive model we will now grow trees. A Japanese Forest full of Bonsai. Well, not literally but we will - similar to a Bonsai -  prune the tree at some point in order to make it prettier. In data science terms this means reducing our model's RMSE reflecting a higher technical quality of selected features. In a secondary step, we will use *Boosting* for the same purpose of selecting variables containing information that will make our model more accurate. For this, we will use our pre-processed training dataset. 
+
+###Random Forest
+
+```{r tree, warning=FALSE}
+set.seed (1)
+train = sample(1:nrow(completedData), nrow(completedData)/2)
+tree.house=tree(SalePrice~ .,completedData ,subset=train)
+summary(tree.house)
+
+#Fitting the random forest 
+plot(tree.house)
+text(tree.house ,pretty=0)
+```
+
+
+```{r tree check prune, warning=FALSE}
+#Check where to prune the tree
+cv.house=cv.tree(tree.house)
+plot(cv.house$size ,cv.house$dev ,type='b')
+```
+
+The plot indicates that there is a marginal gain in reducing the model error by pruning the tree between 6 and 9. Consequently, we will play around with those values and observe how many levels yield the best result. Having tested all values between 6 and 9 the best result has proved to be 7 nodes.
+
+```{r tree prune, warning=FALSE}
+prune.house=prune.tree(tree.house ,best=7)
+plot(prune.house)
+text(prune.house ,pretty=0)
+summary(prune.house)
+```
+
+Based on our beautiful tree, here are the features according to their importance:
+
+* OverallQual:
++ Overall material and finish quality
+* Neighborhood: 
++ Physical locations within Ames city limits
+* GrLivArea:
++ Above grade (ground) living area square feet
+
+###Crossvalidation
+To cross-validate, we will use the test dataset and observe the MSE. 
+```{r tree cross-validate, warning=FALSE}
+yhat=predict(tree.house ,newdata=completedDataTest[-train ,])
+house.test=completedData[-train,c("SalePrice")]
+plot(yhat,house.test)
+abline(0,1)
+mean((yhat-house.test)^2)
+```
+
+Using regression tree techniques yields an MSE of 0.2814337. Since we only used a few features (3 out of 90) in order to derive this tree, it is not surprising that we were not able to capture a good predictive model of the SalePrice by using only a fraction of features that are at our disposal from the entire dataset. Hence, we will keep those results as a reference for feature selection in order to plug them into a more sophisticated linear model at a later stage.
+
+###Boosting
+
+This section has been inspired by the book "Introduction to Statistical Learning" by Robert Tibshirani and Trevor Hastie and this Rbloggers [post]https://www.r-bloggers.com/gradient-boosting-in-r/.
+
+The boosted model we will use is a Gradient Boosted Model which generates 10000 trees and the shrinkage parameter (\lambda= 0.01\) describing the learning Rate. Another parameter is the interaction depth which explains the total number of splits we want to achieve. In this case, each tree is a small tree with only 4 splits. The summary of the model provides a feature importance plot where on the top is the most important variable and at last is the least important variable. In our case, the most important feature is *OverallQual* which we already identified in the regression tree previously.
+
+```{r tree boosting, warning=FALSE}
+set.seed (1)
+boost.house=gbm(SalePrice ~.,data=completedData[train,],distribution ="gaussian",n.trees=5000, interaction.depth=4, shrinkage = 0.01)
+#call summary 
+summary(boost.house)
+```
+
+
+```{r tree boost plot, warning=FALSE}
+#Plot of Response variable with OverallQual variable
+plot(boost.house,i="OverallQual") 
+#Inverse relation with OverallQual  variable
+
+plot(boost.house,i="TotalBsmtSF") 
+#as the average number of rooms increases the the price increases
+```
+
+The above plot shows the relation between the variables in the x-axis and the mapping function \(f(x)\) on the y-axis. The first plot shows that OverallQual, as well as TotalBsmtSF, are positively correlated with the response variable SalePrice.
+
+```{r tree predmatrix, warning=FALSE}
+n.trees = seq(from=100 ,to=10000, by=100) #no of trees-a vector of 100 values 
+
+#Generating a Prediction matrix for each Tree
+predmatrix<-predict(boost.house,completedData[-train,],n.trees = n.trees)
+dim(predmatrix) #dimensions of the Prediction Matrix
+
+#Calculating The Mean squared Test Error
+test.error<-with(completedData[-train,],apply( (predmatrix-SalePrice)^2,2,mean))
+head(test.error) #contains the Mean squared test error for each of the 100 trees averaged
+
+#Plotting the test error vs number of trees
+plot(n.trees , test.error , pch=10,col="blue",xlab="Number of Trees",ylab="Test Error", main = "Perfomance of Boosting on Test Set")
+
+#Adding the RandomForests Minimum Error line trained on same data and similar parameters
+abline(h = min(test.error),col="red") 
+
+#Test.err is the test error of a Random forest fitted on same data
+legend("topright",c("Minimum Test error Line for Random Forests"),col="red",lty=0.5,lwd=0.5)
+```
+
+The plot indicates the least error obtained from training a Random Forest (red line). Boosting outperforms Random Forests on same test dataset with lesser Mean squared Test Errors in an interval between c.a. 400-800 trees. As the number of trees exceeds this interval, Random Forest will yield better results in terms of obtaining the least test error. However, increasing the number of trees will lead to overfitting hence, we prefer boosting over Random Forest in this scenario and choose to grow between 400 and 800 trees. 
+
+```{r tree predmatrix 400, warning=FALSE}
+n.trees = seq(from=400 ,to=1000, by=50) #no of trees-a vector of 100 values 
+
+#Generating a Prediction matrix for each Tree
+predmatrix<-predict(boost.house,completedData[-train,],n.trees = n.trees)
+dim(predmatrix) #dimensions of the Prediction Matrix
+
+#Calculating The Mean squared Test Error
+test.error<-with(completedData[-train,],apply( (predmatrix-SalePrice)^2,2,mean))
+head(test.error) #contains the Mean squared test error for each of the 100 trees averaged
+
+#Plotting the test error vs number of trees
+plot(n.trees , test.error , pch=10,col="blue",xlab="Number of Trees",ylab="Test Error", main = "Perfomance of Boosting on Test Set")
+
+#adding the RandomForests Minimum Error line trained on same data and similar parameters
+abline(h = min(test.error),col="red") 
+
+#test.err is the test error of a Random forest fitted on same data
+legend("topright",c("Minimum Test error Line for Random Forests"),col="red",lty=0.5,lwd=0.5)
+
+dim(predmatrix)
+
+head(test.error)
+```
+
+#Modeling
+
+Wow, a lot of interesting steps we did until now but one might ask - what for? If you remember, our initial aim was to predict the SalePrice of houses in Ames, Iowa. For this, we first cleaned, transformed and enriched the data through feature engineering. In a second step, we used feature selection methods that would provide us with the information content of our explanatory variables. With all this new (and pretty awesome) info, we will now proceed to embed our knowledge into an actual predictive model. Hence, we will first split out dataset into training, test and validation. This is useful in order to ensure a general yet, explanatory model that avoids bias. 
+
+So put your seatbelts on and let's get some predictions!
+
+##Test Training Split
+```{r Split, message=FALSE, warning=FALSE}
+
+splitdf <- function(dataframe, seed=NULL) {
+  if (!is.null(seed)) set.seed(seed)
+ 	index <- 1:nrow(dataframe)
+ 	trainindex <- sample(index, trunc(length(index)/1.5))
+ 	trainset <- dataframe[trainindex, ]
+ 	testset <- dataframe[-trainindex, ]
+ 	list(trainset=trainset,testset=testset)
+}
+
+splits <- splitdf(completedData, seed=1)
+training <- splits$trainset
+validation <- splits$testset
+
+set.seed(121)
+train_control_config <- trainControl(method = "repeatedcv", 
+                       number = 5, 
+                       repeats = 1,
+                       returnResamp = "all")
+```
+
+##Linear Regression Model
+
+```{r lm, warning=FALSE}
+m1 <- glm(formula=SalePrice ~ OverallQual + (OverallQual)^2 + Age + Neighborhood + GrLivArea + (GrLivArea)^2 + TotalBsmtSF + X1stFlrSF + BsmtFinSF1 + GarageArea + MoSold + CentralAir + GarageCars + OverallCond + RemodSold + LotArea + Exterior2nd + SaleCondition + GrLivArea:LotArea + Refurb:Age +  OverallCond:Age, family=gaussian, data=training)
+
+
+for (x in names(validation)) {
+  m1$xlevels[[x]] = union(m1$xlevels[[x]],
+    levels(validation[[x]]))
+}
+
+#SANITY CHECKS IF THE CODE IS SAFE 
+m1.pred = predict(m1, validation)
+m1.pred[is.na(m1.pred)] = 0
+
+
+my_data=as.data.frame(cbind(predicted=m1.pred,observed=validation$SalePrice))
+
+paste("Full Linear Regression RMSE = ", sqrt(mean((m1.pred - validation$SalePrice)^2)))
+
+m1.pred <- predict(m1, completedDataTest)
+
+sol <- data.frame(Id=dft$Id, SalePrice=exp(m1.pred))
+write.csv(sol, file="solution.csv", row.names=F)
+
+ggplot(my_data,aes(predicted,observed))+
+  geom_point() + geom_smooth(method = "lm") +
+  labs(x="Predicted") +
+  ggtitle('Linear Model')
+
+```
+
+#Conclusion
+
+If we were again to ask a home buyer to explain their dream house, they would probably not guess anymore but reach out to us and ask for a prediction of the house they want to buy based on certain information. So, in the end, what can we tell potential house buyers?
+
+1. There is no ultimate model that will determine 100% accurately the price of a house.
+
+2. Using only 16 variables we were able to explain almost 90% of the information contained in the SalePrice with an $R^2$ of 88%. Using all 90 variables would only marginally increase the information gain thus, we were able to create a good yet, simple model (p.s. Data Scientist love this!)
+
+3. Our analysis yielded an RMSE of residual mean squared error of 13-14.5%, varying on the input data. RMSE can be interpreted as the standard deviation of the unexplained variance and has the useful property of being in the same units as the response variable. This is a fair result which can be used as a precursor of further qualitative analyses when determining the real value of a house.
+
+4. Modeling is an iterative process that follows a strict structure with back- and forward testing. Using tree-based methods, alongside direct and indirect feature selection techniques we were able to come up with better results.
+
+5. Feature engineering reveals patterns hidden in the data. We accomplished to build a good model using new features in their interaction such as Refurb:Age and OverallCond:Age. 
+
+6. Data cleaning is no fun but there are ways, such as plots, to identify critical variables and clean them manually and let pre-built packages take care of less critical variables. This saves time and is more efficient.
+
+##Last Note
+
+Don't fear when buying a house! Gladly, there are data scientists like us to help you out! Not only by making the life of fraudulent real estate agents harder but also helping to bring more transparency to the housing market.
+
+Thank you for reading our analysis and we hope you had more than just one beer to make it so far!
+
+__Cheers!__
